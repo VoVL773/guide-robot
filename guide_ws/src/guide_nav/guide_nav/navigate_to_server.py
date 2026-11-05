@@ -545,23 +545,16 @@ class NavigateToServer(Node):
                         goal_handle.canceled()
                         return self._result(False, "导航被取消", "canceled", distance)
 
-                    # 侧向绕行：第 1 次向左、第 2 次向右；同侧不行立刻换另一侧
+                    # 避障统一向右：右侧不可行就判受阻，不再镜像到左侧
                     offsets = self.cfg.stall.detour_offsets_m
                     offset_m = offsets[min(recoveries - 1, len(offsets) - 1)]
-                    side = 1 if recoveries % 2 == 1 else -1
-                    detoured = False
-                    for _ in range(2):
-                        outcome = self._detour(goal_handle, poi, offset_m, side)
-                        if outcome == "cancelled":
-                            goal_handle.canceled()
-                            return self._result(False, "导航被取消", "canceled",
-                                                distance)
-                        if outcome == "ok":
-                            detoured = True
-                            break
-                        side = -side
-                    if not detoured:
-                        message = f"{poi} 左右两侧绕行均失败，本段放弃"
+                    outcome = self._detour(goal_handle, poi, offset_m, -1)
+                    if outcome == "cancelled":
+                        goal_handle.canceled()
+                        return self._result(False, "导航被取消", "canceled",
+                                            distance)
+                    if outcome != "ok":
+                        message = f"{poi} 右侧绕行失败，本段放弃"
                         self.get_logger().error(message)
                         goal_handle.abort()
                         return self._result(False, message, "blocked", distance)
