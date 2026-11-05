@@ -26,6 +26,7 @@ def generate_launch_description() -> LaunchDescription:
     auto_start = LaunchConfiguration("auto_start")
     points = LaunchConfiguration("points_config")
     script = LaunchConfiguration("script_config")
+    enable_head = LaunchConfiguration("enable_head")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -40,6 +41,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "script_config", default_value=script_config,
             description="讲解词配置 YAML（默认使用安装目录里的 guide_script.yaml）"),
+        DeclareLaunchArgument(
+            "enable_head", default_value="false",
+            description="是否启用头部朝向（第一步只做导航+播报，头部留到下一步）"),
 
         Node(
             package="guide_nav",
@@ -51,13 +55,7 @@ def generate_launch_description() -> LaunchDescription:
                 "points_config": points,
             }],
         ),
-        Node(
-            package="guide_head",
-            executable="head_server",
-            name="guide_head",
-            output="screen",
-            parameters=[{"dry_run": dry_run}],
-        ),
+        # 第一步只跑导航+语音+编排；头部朝向留到下一步（enable_head:=true）
         Node(
             package="guide_voice",
             executable="speak_action_server",
@@ -74,6 +72,7 @@ def generate_launch_description() -> LaunchDescription:
                 "points_config": points,
                 "script_config": script,
                 "auto_start": auto_start,
+                "enable_head": enable_head,
             }],
         ),
     ])

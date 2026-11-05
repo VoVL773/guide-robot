@@ -1,13 +1,10 @@
 # 导览讲解词配置
 #
-# intro / outro 分别对应「到起点后」和「返程前」的播报，留空则跳过。
-# points 里的键必须与 guide_points.yaml 的 poi_order 点位同名；
-# 没有填写讲解词的点位只导航不播报（启动时会有告警）。
+# 第一步只验证「沿轨道走一圈 + 到点播报」，因此每个点位只播一句到达提示。
+# 后续再把 text 换成正式讲解词；head_yaw / head_pitch 在启用头部后生效。
 #
-# head_yaw   : 讲解时头部左右转（弧度，正=向左，限位 ±90°=±1.5708）
-# head_pitch : 讲解时头部俯仰（弧度，正=低头，限位 ±25°=±0.4363）
-#              抬头看高处展品要填负值
-# 点位未单独配置 head_yaw/head_pitch 时使用 head 下的默认值（回中）。
+# points 的键必须与 guide_points.yaml 的 poi_order 同名；
+# 没有填写讲解词的点位只导航不播报（启动时会有告警）。
 
 intro: ""
 outro: ""
@@ -16,11 +13,14 @@ head:
   yaw: 0.0
   pitch: 0.0
 
-points: {}
-#   POI_05:
-#     text: "这里是……，它的特点是……。"
-#     head_yaw: -0.3
-#     head_pitch: -0.15
-#   POI_06:
-#     text: "接下来我们看到的是……。"
-#     head_yaw: 0.4
+points:
+  POI_01:
+    text: "到达点位1"
+  POI_02:
+    text: "到达点位2"
+  POI_03:
+    text: "到达点位3"
+  POI_04:
+    text: "到达点位4"
+  POI_05:
+    text: "到达点位5"

@@ -20,13 +20,14 @@
 
 poi_source: chassis      # 目前只支持 chassis（坐标一律读底盘）
 
-start_poi: ""            # TODO: 标记后填写起点 POI 名称，例如 start_point
-poi_order: []            # TODO: 按顺序填写讲解点，例如 [POI_05, POI_06, POI_07]
+start_poi: POI_START     # 来自地图文件 20261105_080739.bag
+poi_order: [POI_01, POI_02, POI_03, POI_04, POI_05]
 
 # 轨道按名称指定：讲解段用 outbound，返程用 return（从最后一个讲解点回起点）
+# 当前地图只有一条 track_line_1000，终点即 POI_05，没有返程轨道。
 tracks:
-  outbound: ""           # TODO: 讲解点所在轨道名称，例如 track_line_1000
-  return: ""             # 可留空；留空时返程用点对点
+  outbound: track_line_1000
+  return: ""             # 留空：巡检完停在最后一个点位，不做点对点返程
 
 # 只过点、不停留讲解的点位（默认不停留；需要停留用 dwell_overrides 指定）
 transit_pois: []

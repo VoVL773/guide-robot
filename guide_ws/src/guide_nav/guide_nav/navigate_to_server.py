@@ -130,6 +130,7 @@ class NavigateToServer(Node):
         self._exec_lock = threading.Lock()
         self._speed_backup = None
         self._pois: dict[str, dict] = {}
+        self._map_name = ""
         self._tracks: dict[str, int] = {}
         self._problems: list[str] = []
         self.cfg = None
@@ -235,6 +236,7 @@ class NavigateToServer(Node):
     def _read_map_and_pois(self) -> None:
         rv = self._chassis.get_current_map()
         map_name = rv.get("map_name") if isinstance(rv, dict) else None
+        self._map_name = str(map_name or "")
         rv = self._chassis.get_pois(map_name=map_name, point_name=None)
         self._pois = {}
         for poi in _unwrap_list(rv, "pois", "poi", "data"):
@@ -245,7 +247,8 @@ class NavigateToServer(Node):
                 self._pois[str(name)] = poi
 
     def _read_tracks(self) -> None:
-        rv = self._chassis.get_tracks()
+        # 轨道必须按当前地图名查询，否则底盘返回空列表
+        rv = self._chassis.get_tracks(map_name=self._map_name or None)
         self._tracks = {}
         for track in _unwrap_list(rv, "tracks", "track", "data"):
             if not isinstance(track, dict):

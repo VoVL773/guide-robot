@@ -48,12 +48,14 @@ class GuideOrchestrator(Node):
         self.declare_parameter("points_config", _share_path("config", "guide_points.yaml"))
         self.declare_parameter("script_config", _share_path("config", "guide_script.yaml"))
         self.declare_parameter("auto_start", True)
+        self.declare_parameter("enable_head", False)
 
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._active_goal = None
         self._worker = None
         self._state = "idle"
+        self.enable_head = bool(self.get_parameter("enable_head").value)
 
         self.cfg: PointsConfig | None = None
         self.script: ScriptConfig | None = None
@@ -202,7 +204,8 @@ class GuideOrchestrator(Node):
                 point_script = script.point(poi)
                 if not self._wait_ready():
                     return
-                self._set_head(point_script.head_yaw, point_script.head_pitch, poi)
+                if self.enable_head:
+                    self._set_head(point_script.head_yaw, point_script.head_pitch, poi)
 
                 if not self._wait_ready():
                     return
@@ -219,13 +222,16 @@ class GuideOrchestrator(Node):
             if script.outro and not self._speak(script.outro, "结束语"):
                 return
 
-            if not self._wait_ready():
-                return
-            if not self._navigate(cfg.start_poi, bool(cfg.tracks.return_track),
-                                  cfg.tracks.return_track,
-                                  cfg.timeouts.to_start_s, "返回起点",
-                                  index=len(order), total=len(order)):
-                return
+            # 只有配置了返程轨道才返程；否则停在最后一个点位（单轨地图走一圈）
+            if cfg.tracks.return_track:
+                if not self._wait_ready():
+                    return
+                if not self._navigate(cfg.start_poi, True, cfg.tracks.return_track,
+                                      cfg.timeouts.to_start_s, "返回起点",
+                                      index=len(order), total=len(order)):
+                    return
+            else:
+                self.get_logger().info("未配置返程轨道，停在最后一个点位")
 
             self._state = "finished"
             self._publish("finished", "idle", "", len(order), "导览结束")

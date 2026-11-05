@@ -18,6 +18,14 @@ guide_ws/src/
     └── config/guide_script.yaml   每个点位的讲解词与头部朝向
 ```
 
+## 当前进度
+
+- ✅ 第一步：起点 `POI_START` → 沿 `track_line_1000` 依次到 `POI_01`~`POI_05`，
+  到点播报「到达点位N」，结束停在最后一个点位（地图只有这一条轨道，没有返程）
+- ⏳ 下一步：头部回中/朝向（`guide_head`，launch 加 `enable_head:=true`）、正式讲解词
+
+点位与轨道名称来自地图文件 `20261105_080739.bag`，已填入 `guide_points.yaml`。
+
 ## 构建
 
 ```bash
