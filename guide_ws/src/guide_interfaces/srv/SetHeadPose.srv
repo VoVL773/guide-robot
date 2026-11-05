@@ -1,0 +1,8 @@
+# request
+float32 yaw           # 头部左右转，正=向左，限位 ±90°
+float32 pitch         # 头部俯仰，正=低头，限位 ±25°
+float32 duration_s    # 平滑过渡时长，<=0 用节点默认值
+---
+# response
+bool success
+string message

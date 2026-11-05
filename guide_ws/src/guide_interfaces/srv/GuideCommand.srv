@@ -1,0 +1,7 @@
+# request
+string command        # start | pause | resume | stop | goto
+string poi_name       # command=goto 时必填
+---
+# response
+bool accepted
+string message

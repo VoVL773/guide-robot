@@ -1,0 +1,11 @@
+# 导览头部控制配置
+dry_run: true              # 与 launch 的 dry_run 参数同值；启动时用 launch 覆盖
+
+head:
+  cmd_topic: /head/cmd
+  state_topic: /robot_state
+  rate_hz: 100.0           # 位置模式需要连续下发，实测 100Hz
+  default_duration_s: 1.5  # SetHeadPose 未指定 duration_s 时的过渡时长
+  speed: 0.15              # 关节速度（协议单位，fire 现场验证值）
+  current: 2.0             # 关节电流限制
+  center_on_start: true    # 启动先把头部回到 yaw=0 / pitch=0

@@ -1,0 +1,14 @@
+# goal
+string poi_name        # 目标 POI 名称，必须存在于底盘 POI 表与 guide_points.yaml
+bool use_track         # true=沿轨道行驶；false=点对点（首点、返程到起点）
+string track_id        # 轨道名，use_track=true 时必填
+---
+# result
+bool success
+string state           # done | rejected | failed | canceled | timeout
+string message
+float32 distance_m     # 下发前计算的直线距离，仅用于日志
+---
+# feedback
+float32 progress       # 0.0 ~ 1.0，按剩余直线距离估算
+string phase           # dispatched | moving | arrived

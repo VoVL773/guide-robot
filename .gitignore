@@ -1,0 +1,9 @@
+# colcon 构建产物
+guide_ws/build/
+guide_ws/install/
+guide_ws/log/
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
