@@ -60,6 +60,13 @@ _RELOCALIZE_TRIGGER_STATUS = frozenset({1, 2, 3, 5})
 # 撤干净、等一拍再原样重发一次，避免一次拒绝就终止整轮导览。
 _REDISPATCH_SETTLE_S = 1.0
 
+# 出发/到点朝向对齐：差小于该角度不再原地补转
+_ALIGN_TOLERANCE_RAD = 0.15
+# 点对点出发对齐：距目标太近时没有有效方向，跳过
+_POINT_ALIGN_MIN_DIST_M = 0.4
+# 单次原地转向动作的等待上限（90° 约 5s，留足余量）
+_ALIGN_TIMEOUT_S = 20.0
+
 
 def _unwrap_list(rv, *keys):
     """容错：REST 返回可能是 {"<key>": [...]} / dict 包 list / 直接 list。"""
@@ -423,6 +430,25 @@ class NavigateToServer(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"设置分段限速失败（沿用启动值）：{exc}")
 
+        # 点对点接口默认边转边移：车头背离目标时会横着平移过去。
+        # 出发前先原地转到目标方向，避免「侧着走」。
+        if not bool(req.use_track):
+            target = self._pois.get(poi) or {}
+            pose = self._read_pose()
+            try:
+                px, py = float(pose["x"]), float(pose["y"])
+                tx, ty = float(target["x"]), float(target["y"])
+            except (KeyError, TypeError, ValueError):
+                px = None
+            if px is not None:
+                bearing = math.atan2(ty - py, tx - px)
+                if math.hypot(tx - px, ty - py) >= _POINT_ALIGN_MIN_DIST_M:
+                    outcome = self._align_heading(
+                        goal_handle, poi, bearing, "点对点行进朝向")
+                    if outcome == "cancelled":
+                        goal_handle.canceled()
+                        return self._result(False, "导航被取消", "canceled", distance)
+
         try:
             action_id = self._dispatch(poi, bool(req.use_track), str(req.track_id))
         except Exception as exc:  # noqa: BLE001
@@ -444,6 +470,8 @@ class NavigateToServer(Node):
         # 受阻检测锚点：从「最近一次确认有位移」的位置算起
         stall_anchor = start_xy
         stall_anchor_at = started_at
+        # 车头转动也算「在动」：原地转向时位移不变，不能误判受阻
+        stall_anchor_yaw = None
         recoveries = 0
         transient_retried = False
         track_fallback = False
@@ -494,6 +522,7 @@ class NavigateToServer(Node):
                     start_xy = self._pose_xy(self._read_pose())
                     stall_anchor = start_xy
                     stall_anchor_at = started_at
+                    stall_anchor_yaw = None
                     continue
                 if (transient_retried and not track_fallback
                         and bool(req.use_track) and _never_started(status)):
@@ -507,6 +536,7 @@ class NavigateToServer(Node):
                     start_xy = self._pose_xy(self._read_pose())
                     stall_anchor = start_xy
                     stall_anchor_at = started_at
+                    stall_anchor_yaw = None
                     continue
                 message = f"底盘导航失败：{status!r}"
                 self.get_logger().error(message)
@@ -519,13 +549,25 @@ class NavigateToServer(Node):
 
             if self.cfg.stall.enabled:
                 xy = self._pose_xy(pose)
+                yaw = pose.get("yaw") if isinstance(pose, dict) else None
                 if xy is not None:
+                    turned = False
+                    try:
+                        turned = (stall_anchor_yaw is not None and yaw is not None
+                                  and abs(math.atan2(
+                                      math.sin(float(yaw) - stall_anchor_yaw),
+                                      math.cos(float(yaw) - stall_anchor_yaw)
+                                  )) >= 0.20)
+                    except (TypeError, ValueError):
+                        turned = False
                     if stall_anchor is None:
                         stall_anchor, stall_anchor_at = xy, now
-                    elif math.hypot(
+                        stall_anchor_yaw = yaw
+                    elif turned or math.hypot(
                         xy[0] - stall_anchor[0], xy[1] - stall_anchor[1]
                     ) >= self.cfg.stall.min_progress_m:
                         stall_anchor, stall_anchor_at = xy, now
+                        stall_anchor_yaw = yaw
                 stalled = (
                     stall_anchor is not None
                     and now - stall_anchor_at >= self.cfg.stall.detect_window_s
@@ -586,6 +628,7 @@ class NavigateToServer(Node):
                         started_at = time.monotonic()
                         stall_anchor = self._pose_xy(self._read_pose())
                         stall_anchor_at = time.monotonic()
+                        stall_anchor_yaw = None
                         continue
 
                     if self._shutdown or goal_handle.is_cancel_requested:
@@ -621,6 +664,7 @@ class NavigateToServer(Node):
                     started_at = time.monotonic()
                     stall_anchor = self._pose_xy(self._read_pose())
                     stall_anchor_at = time.monotonic()
+                    stall_anchor_yaw = None
                     continue
 
             if distance > 0.0:
@@ -655,6 +699,66 @@ class NavigateToServer(Node):
         self.get_logger().info(f"[dry_run] 已到达 {poi}（模拟）")
         goal_handle.succeed()
         return self._result(True, f"dry_run 已到达 {poi}", "done", distance)
+
+    def _align_heading(self, goal_handle, poi: str, target_yaw: float,
+                       reason: str) -> str:
+        """原地转到指定朝向（flags=0 只转向不移动）。
+
+        点对点接口默认「边转边移」，车头背离目标时会横着平移过去；出发前
+        先原地转正，车就是正着走的。对齐只是体验优化，任何失败都只告警。
+        """
+        pose = self._read_pose()
+        try:
+            x, y = float(pose["x"]), float(pose["y"])
+            actual = float(pose["yaw"])
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warn(f"{poi} 位姿缺少 x/y/yaw，跳过{reason}对齐：{pose!r}")
+            return "ok"
+
+        error = abs(math.atan2(
+            math.sin(target_yaw - actual), math.cos(target_yaw - actual)))
+        if error <= _ALIGN_TOLERANCE_RAD:
+            self.get_logger().info(
+                f"{poi} {reason}已对齐：目标={target_yaw:.3f}rad，"
+                f"实际={actual:.3f}rad，误差={error:.3f}rad")
+            return "ok"
+
+        self.get_logger().info(
+            f"{poi} 出发前{reason}对齐：目标={target_yaw:.3f}rad，"
+            f"实际={actual:.3f}rad，误差={error:.3f}rad，原地转向")
+        try:
+            response = self._chassis.move_to(x, y, target_yaw, flags=0)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"{poi} {reason}对齐下发失败，继续导航：{exc}")
+            return "ok"
+        action_id = response.get("action_id") if isinstance(response, dict) else None
+        if action_id is None:
+            self.get_logger().warn(
+                f"{poi} {reason}对齐未返回 action_id：{response!r}，继续导航")
+            return "ok"
+
+        deadline = time.monotonic() + _ALIGN_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self._shutdown or goal_handle.is_cancel_requested:
+                self._cancel_and_settle(str(action_id))
+                return "cancelled"
+            try:
+                status = self._chassis.get_action_status(str(action_id))
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"{poi} {reason}对齐状态轮询异常：{exc}")
+                status = None
+            verdict = _classify_action_status(status)
+            if verdict == "success":
+                return "ok"
+            if verdict == "failure":
+                self.get_logger().warn(
+                    f"{poi} {reason}对齐被底盘判失败，跳过对齐继续导航：{status!r}")
+                return "ok"
+            time.sleep(0.2)
+
+        self._cancel_and_settle(str(action_id))
+        self.get_logger().warn(f"{poi} {reason}对齐超时 {_ALIGN_TIMEOUT_S:.0f}s，继续导航")
+        return "ok"
 
     def _dispatch(self, poi: str, use_track: bool, track_name: str) -> int:
         if not use_track:
@@ -693,6 +797,18 @@ class NavigateToServer(Node):
             self.get_logger().error(message)
             goal_handle.abort()
             return self._result(False, message, "failed", distance)
+
+        if isinstance(target, dict):
+            try:
+                target_yaw = float(target["yaw"])
+            except (KeyError, TypeError, ValueError):
+                target_yaw = None
+            if target_yaw is not None:
+                outcome = self._align_heading(
+                    goal_handle, poi, target_yaw, "到点朝向")
+                if outcome == "cancelled":
+                    goal_handle.canceled()
+                    return self._result(False, "导航被取消", "canceled", distance)
 
         detail = (f"已到达 {poi}" if offset is None
                   else f"已到达 {poi}（偏差 {offset:.2f}m）")
