@@ -446,6 +446,7 @@ class NavigateToServer(Node):
         stall_anchor_at = started_at
         recoveries = 0
         transient_retried = False
+        track_fallback = False
 
         def redispatch(point: bool = False) -> str:
             """重发原目标；point=True 时强制点对点（绕行后已离开轨道）。"""
@@ -489,6 +490,19 @@ class NavigateToServer(Node):
                         return self._result(False, "导航被取消", "canceled", distance)
                     self._apply_motion_limits(str(req.track_id), poi)
                     action_id = redispatch()
+                    started_at = time.monotonic()
+                    start_xy = self._pose_xy(self._read_pose())
+                    stall_anchor = start_xy
+                    stall_anchor_at = started_at
+                    continue
+                if (transient_retried and not track_fallback
+                        and bool(req.use_track) and _never_started(status)):
+                    # 轨道接口连续两次从未起步就拒绝：退回点对点，
+                    # 先让导览走完，不能卡在底盘轨道接口上
+                    track_fallback = True
+                    self.get_logger().warn(
+                        f"{poi} 轨道动作连续被拒，改为点对点前往（不再重试轨道）")
+                    action_id = redispatch(point=True)
                     started_at = time.monotonic()
                     start_xy = self._pose_xy(self._read_pose())
                     stall_anchor = start_xy
