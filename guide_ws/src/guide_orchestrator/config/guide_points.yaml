@@ -20,18 +20,19 @@
 
 poi_source: chassis      # 目前只支持 chassis（坐标一律读底盘）
 
-start_poi: POI_START     # 来自地图文件 20261105_092006.bag（神秘介绍地图）
-poi_order: [POI_01, POI_02, POI_03, POI_04, POI_05]
+start_poi: start_point   # 底盘当前地图：消防（2026-11-05 实读）
+poi_order: [POI_01, POI_02, POI_03, POI_04]
 
 # 轨道按名称指定：讲解段用 outbound，返程用 return（从最后一个讲解点回起点）
-# 当前 track_line_1000 是闭环：起点 -> 沿走廊到 POI_04 -> 掉头 -> 经 POI_05
-# -> 回到起点。去程与返程共用这一条轨道，返程同样按轨道走。
+# 消防地图：track_line_1000 起点 -> POI_01 -> POI_02 -> POI_03；
+# POI_04 不在去程轨道上（是返程上轨点），用点对点到达后，
+# 再由 track_line_1001 从 POI_04 返回起点。
 tracks:
   outbound: track_line_1000
-  return: track_line_1000   # 与去程同名：走到 POI_05 后继续沿轨道回起点
+  return: track_line_1001
 
-# 只过点、不停留讲解的点位（默认不停留；需要停留用 dwell_overrides 指定）
-transit_pois: []
+# 轨道覆盖不到、改用点对点到达的点位（到达后照常讲解与停留）
+transit_pois: [POI_04]
 
 timeouts:
   to_start_s: 180.0      # 前往起点 / 返回起点的单段超时

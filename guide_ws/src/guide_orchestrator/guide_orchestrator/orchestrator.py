@@ -196,7 +196,10 @@ class GuideOrchestrator(Node):
                 if not self._wait_ready():
                     return
                 poi = order[index]
-                if not self._navigate(poi, True, cfg.tracks.outbound,
+                # transit_pois 里的点不在去程轨道上，只能点对点过去
+                use_track = poi not in cfg.transit_pois
+                track = cfg.tracks.outbound if use_track else ""
+                if not self._navigate(poi, use_track, track,
                                       cfg.timeouts.per_poi_s, "前往讲解点",
                                       index=index + 1, total=len(order)):
                     return
