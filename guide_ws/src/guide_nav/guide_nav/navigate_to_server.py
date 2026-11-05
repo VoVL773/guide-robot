@@ -456,6 +456,7 @@ class NavigateToServer(Node):
                         f"{poi} 下发 {elapsed:.2f}s 即被底盘拒绝（未观测到位移），"
                         f"按瞬态重发一次：{status!r}")
                     self._cancel_and_settle(action_id)
+                    self._apply_motion_limits(str(req.track_id))
                     action_id = redispatch()
                     started_at = time.monotonic()
                     start_xy = self._pose_xy(self._read_pose())
@@ -532,6 +533,7 @@ class NavigateToServer(Node):
                             self.get_logger().error(message)
                             goal_handle.abort()
                             return self._result(False, message, "blocked", distance)
+                        self._apply_motion_limits(str(req.track_id))
                         action_id = redispatch()
                         self.get_logger().info(
                             f"{poi} 受阻自恢复：已原地转向并重发原目标，"
@@ -567,6 +569,7 @@ class NavigateToServer(Node):
                         return self._result(False, message, "blocked", distance)
 
                     # 已侧偏离开轨道：改点对点直奔点位，避免重新上轨又被同一障碍挡住
+                    self._apply_motion_limits(str(req.track_id))
                     action_id = redispatch(point=True)
                     self.get_logger().info(
                         f"{poi} 受阻自恢复：已绕行并重发原目标，action_id={action_id}")
@@ -759,6 +762,23 @@ class NavigateToServer(Node):
             time.sleep(self.poll)
         self._cancel_and_settle(action_id)
         return "timeout"
+
+    def _apply_motion_limits(self, track_id: str = "") -> None:
+        """恢复 AEB 与分段限速。
+
+        底盘的相对运动（move_by）和 cancel 都可能改写全局速度参数，
+        自恢复后重发原目标前必须重新下发，否则会按底盘默认速度冲出去。
+        """
+        is_return = bool(track_id) and track_id == self.cfg.tracks.return_track
+        limit = (self.cfg.speed.return_mps if is_return
+                 else self.cfg.speed.outbound_mps)
+        try:
+            self._chassis.set_aeb_control("On")
+            self._chassis.set_speed_params(max_moving_speed=limit)
+        except Exception as exc:  # noqa: BLE001 - 失败只告警，不中断重发
+            self.get_logger().warn(f"自恢复后重设 AEB/限速失败：{exc}")
+            return
+        self.get_logger().info(f"自恢复后重新限速 {limit} m/s 并保持 AEB")
 
     @staticmethod
     def _action_id(response):
