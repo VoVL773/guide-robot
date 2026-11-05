@@ -479,7 +479,8 @@ class NavigateToServer(Node):
         if action_id is None:
             raise RuntimeError(f"底盘未返回 action_id：{response!r}")
         self.get_logger().info(f"导航已下发 action_id={action_id}")
-        return int(action_id)
+        # 底盘返回的是 UUID 字符串（如 52f198bc-...），不能转 int，原样传给状态/取消接口
+        return str(action_id)
 
     def _arrived(self, goal_handle, poi: str, distance: float) -> NavigateTo.Result:
         pose = self._read_pose()
@@ -532,7 +533,7 @@ class NavigateToServer(Node):
         except (KeyError, TypeError, ValueError):
             return 0.0
 
-    def _cancel_action(self, action_id: int) -> None:
+    def _cancel_action(self, action_id: str) -> None:
         try:
             self._chassis.cancel_action([action_id])
         except Exception as exc:  # noqa: BLE001
