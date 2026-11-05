@@ -81,6 +81,33 @@ class RangeLimit:
 
 
 @dataclass(frozen=True)
+class Stall:
+    """受阻自恢复（移植自 fire 巡检）：停滞 → 后退 → 侧向绕行 → 重发。"""
+
+    enabled: bool = True
+    detect_window_s: float = 8.0
+    min_progress_m: float = 0.10
+    backoff_m: float = 0.5
+    backoff_speed_mps: float = 0.2
+    backoff_timeout_s: float = 5.0
+    max_recoveries: int = 2
+    detour_offsets_m: tuple[float, ...] = (1.0, 1.5)
+    detour_timeout_s: float = 30.0
+    retreat_rotate_deg: float = 45.0
+    retreat_rotate_speed_rad_s: float = 0.30
+    retreat_rotate_timeout_s: float = 8.0
+
+
+@dataclass(frozen=True)
+class Corridor:
+    """绕行/退让落点的可行走廊；填墙面物理边界，代码按 margin_m 内缩后校验。"""
+
+    x: tuple[float, float] | None = None
+    y: tuple[float, float] | None = None
+    margin_m: float = 0.0
+
+
+@dataclass(frozen=True)
 class PointsConfig:
     start_poi: str = ""
     poi_order: tuple[str, ...] = ()
@@ -94,6 +121,8 @@ class PointsConfig:
     yaw_overrides: dict[str, float] = field(default_factory=dict)
     relocalize: Relocalize = field(default_factory=Relocalize)
     range_limit: RangeLimit = field(default_factory=RangeLimit)
+    stall: Stall = field(default_factory=Stall)
+    corridor: Corridor = field(default_factory=Corridor)
     source: str = ""
 
     @property
@@ -111,7 +140,7 @@ class PointsConfig:
 _POINTS_KEYS = {
     "poi_source", "start_poi", "poi_order", "tracks", "transit_pois",
     "timeouts", "dwell_s", "dwell_overrides", "speed", "arrival_tolerance_m",
-    "yaw_overrides", "relocalize", "range_limit",
+    "yaw_overrides", "relocalize", "range_limit", "stall", "corridor",
 }
 
 
@@ -151,6 +180,92 @@ def _range(path: str, key: str, value: Any) -> tuple[float, float]:
     if lo >= hi:
         raise _error(path, key, f"下限必须小于上限，实际为 {value!r}")
     return (lo, hi)
+
+
+def _parse_stall(path: str, raw: dict) -> Stall:
+    """解析受阻自恢复配置；出现未知键或非法值一律拒绝启动。"""
+    stall_raw = _mapping(path, "stall", raw.get("stall"))
+    _unknown(path, "stall", stall_raw, {
+        "enabled", "detect_window_s", "min_progress_m", "backoff_m",
+        "backoff_speed_mps", "backoff_timeout_s", "max_recoveries",
+        "detour_offsets_m", "detour_timeout_s",
+        "retreat_rotate_deg", "retreat_rotate_speed_rad_s",
+        "retreat_rotate_timeout_s",
+    })
+    offsets_raw = stall_raw.get("detour_offsets_m", [1.0, 1.5])
+    if not isinstance(offsets_raw, (list, tuple)) or not offsets_raw:
+        raise _error(path, "stall.detour_offsets_m",
+                     f"必须是非空列表，实际为 {offsets_raw!r}")
+    offsets = tuple(
+        _num(path, "stall.detour_offsets_m", v) for v in offsets_raw)
+    if len(offsets) > 3:
+        raise _error(path, "stall.detour_offsets_m", f"最多 3 个，实际为 {offsets}")
+    for value in offsets:
+        if not 0.3 <= value <= 3.0:
+            raise _error(path, "stall.detour_offsets_m",
+                         f"元素应在 [0.3, 3.0]，实际为 {value}")
+
+    stall = Stall(
+        enabled=bool(stall_raw.get("enabled", True)),
+        detect_window_s=_num(path, "stall.detect_window_s",
+                             stall_raw.get("detect_window_s", 8.0)),
+        min_progress_m=_num(path, "stall.min_progress_m",
+                            stall_raw.get("min_progress_m", 0.10)),
+        backoff_m=_num(path, "stall.backoff_m", stall_raw.get("backoff_m", 0.5)),
+        backoff_speed_mps=_num(path, "stall.backoff_speed_mps",
+                               stall_raw.get("backoff_speed_mps", 0.2)),
+        backoff_timeout_s=_num(path, "stall.backoff_timeout_s",
+                               stall_raw.get("backoff_timeout_s", 5.0)),
+        max_recoveries=int(stall_raw.get("max_recoveries", 2)),
+        detour_offsets_m=offsets,
+        detour_timeout_s=_num(path, "stall.detour_timeout_s",
+                              stall_raw.get("detour_timeout_s", 30.0)),
+        retreat_rotate_deg=_num(path, "stall.retreat_rotate_deg",
+                                stall_raw.get("retreat_rotate_deg", 45.0)),
+        retreat_rotate_speed_rad_s=_num(
+            path, "stall.retreat_rotate_speed_rad_s",
+            stall_raw.get("retreat_rotate_speed_rad_s", 0.30)),
+        retreat_rotate_timeout_s=_num(
+            path, "stall.retreat_rotate_timeout_s",
+            stall_raw.get("retreat_rotate_timeout_s", 8.0)),
+    )
+    checks = (
+        ("detect_window_s", stall.detect_window_s, 1.0, 30.0),
+        ("min_progress_m", stall.min_progress_m, 0.02, 0.5),
+        ("backoff_m", stall.backoff_m, 0.05, 5.0),
+        ("backoff_speed_mps", stall.backoff_speed_mps, 0.05, 0.6),
+        ("backoff_timeout_s", stall.backoff_timeout_s, 0.5, 20.0),
+        ("detour_timeout_s", stall.detour_timeout_s, 2.0, 120.0),
+        ("retreat_rotate_deg", stall.retreat_rotate_deg, 5.0, 180.0),
+        ("retreat_rotate_speed_rad_s", stall.retreat_rotate_speed_rad_s, 0.05, 1.0),
+        ("retreat_rotate_timeout_s", stall.retreat_rotate_timeout_s, 1.0, 30.0),
+    )
+    for key, value, lower, upper in checks:
+        if not lower <= value <= upper:
+            raise _error(path, f"stall.{key}",
+                         f"应在 [{lower}, {upper}]，实际为 {value}")
+    if not 0 <= stall.max_recoveries <= 3:
+        raise _error(path, "stall.max_recoveries",
+                     f"应在 [0, 3]，实际为 {stall.max_recoveries}")
+    return stall
+
+
+def _parse_corridor(path: str, raw: dict) -> Corridor:
+    """解析绕行落点的可行走廊；未配置时不做走廊限制。"""
+    corridor_raw = _mapping(path, "corridor", raw.get("corridor"))
+    _unknown(path, "corridor", corridor_raw, {"x", "y", "margin_m"})
+    axes: dict[str, tuple[float, float] | None] = {}
+    for axis in ("x", "y"):
+        value = corridor_raw.get(axis)
+        axes[axis] = None if value is None else _range(path, f"corridor.{axis}", value)
+    margin = _num(path, "corridor.margin_m", corridor_raw.get("margin_m", 0.0))
+    if not 0.0 <= margin <= 2.0:
+        raise _error(path, "corridor.margin_m", f"应在 [0, 2]，实际为 {margin}")
+    for axis, bounds in axes.items():
+        if bounds is not None and bounds[1] - bounds[0] <= 2.0 * margin:
+            raise _error(path, f"corridor.{axis}",
+                         f"范围 {bounds} 内缩 {margin}m 后已无可行区域")
+    return Corridor(x=axes["x"], y=axes["y"], margin_m=margin)
 
 
 def load_points(path: str) -> PointsConfig:
@@ -279,6 +394,9 @@ def load_points(path: str) -> PointsConfig:
         y=_range(path, "range_limit.y", range_raw.get("y", [-20.0, 20.0])),
     )
 
+    stall = _parse_stall(path, raw)
+    corridor = _parse_corridor(path, raw)
+
     return PointsConfig(
         start_poi=start_poi,
         poi_order=poi_order,
@@ -292,6 +410,8 @@ def load_points(path: str) -> PointsConfig:
         yaw_overrides=yaw_overrides,
         relocalize=relocalize,
         range_limit=range_limit,
+        stall=stall,
+        corridor=corridor,
         source=path,
     )
 

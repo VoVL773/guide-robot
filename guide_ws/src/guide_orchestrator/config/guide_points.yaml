@@ -68,3 +68,28 @@ relocalize:
 range_limit:
   x: [-10.0, 45.0]
   y: [-20.0, 20.0]
+
+# 受阻自恢复（方案移植自 fire 巡检）：底盘 AEB 只会刹停，没有绕障接口。
+# 导航层「检测停滞 → 取消 → 后退一小段 → 向左/右绕行 → 点对点重发原目标」，
+# 同侧挪不出自动换另一侧，两侧都失败则 state=blocked，由编排层停止并播报。
+stall:
+  enabled: true
+  detect_window_s: 8.0      # 连续无有效位移达到该时长即判受阻（原地转向段不检测）
+  min_progress_m: 0.10      # 窗口内位移小于该值视为没有进展
+  backoff_m: 0.5            # 后退距离（米），底盘要求 50~5000mm，代码内已限幅
+  backoff_speed_mps: 0.2    # 后退限速（0 在底盘接口里表示不限速，禁止填 0）
+  backoff_timeout_s: 5.0    # 单次后退动作超时
+  max_recoveries: 2         # 单段最多自恢复次数（第1次向左、第2次向右）
+  detour_offsets_m: [1.0, 1.5]  # 侧向绕行距离（米），0.3~3.0，按恢复次数依次取
+  detour_timeout_s: 30.0    # 单次侧向绕行的动作超时
+  retreat_rotate_deg: 45.0          # 后退失败时原地转向角度，第1次左、第2次右
+  retreat_rotate_speed_rad_s: 0.30  # 转向角速度限速（0=不限速）
+  retreat_rotate_timeout_s: 8.0     # 单次转向动作超时
+
+# 绕行落点的可行走廊（可选，强烈建议填）：
+# 填走廊两侧墙面的物理边界，代码按 margin_m 内缩后校验落点，
+# 越界就换另一侧，两侧都越界则保持原地不动——避免绕行时把车贴到墙上。
+# 需要现场量两个 y 边界（车中心能到达的极限），margin_m 取 0.9 左右。
+# corridor:
+#   y: [0.35, 3.45]
+#   margin_m: 0.90

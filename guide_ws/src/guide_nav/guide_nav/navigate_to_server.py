@@ -56,6 +56,10 @@ _TERMINAL_FAIL = {
 # 6=重定位中、7=加载地图、8=等待传感器属于底盘正在恢复，重复下发只会互相打断。
 _RELOCALIZE_TRIGGER_STATUS = frozenset({1, 2, 3, 5})
 
+# 动作刚下发就被底盘判 failed 且从未起步的观察窗口：
+# 这通常是「取消后重发」撞上固件停稳过渡期的瞬态拒绝，值得重发一次。
+_INSTANT_FAILURE_S = 1.5
+
 
 def _unwrap_list(rv, *keys):
     """容错：REST 返回可能是 {"<key>": [...]} / dict 包 list / 直接 list。"""
@@ -133,6 +137,7 @@ class NavigateToServer(Node):
         self._map_name = ""
         self._tracks: dict[str, int] = {}
         self._problems: list[str] = []
+        self._rotate_turns = 0
         self.cfg = None
 
         self._chassis = KnewbotChassisNav(
@@ -274,18 +279,21 @@ class NavigateToServer(Node):
                 f"底盘上不存在这些轨道：{missing}；当前轨道：{sorted(self._tracks)}")
 
     def _check_health(self) -> None:
+        faults = self._blocking_faults()
+        if faults:
+            self._problems.append(f"底盘存在阻断性故障：{'; '.join(faults)}")
+
+    def _blocking_faults(self) -> list[str]:
+        """当前阻断运动的故障描述（A/B 类）；读不到健康状态也算一条。"""
         try:
             health = self._chassis.get_robot_health()
         except Exception as exc:  # noqa: BLE001
-            self._problems.append(f"读取底盘健康状态失败：{exc}")
-            return
-        blocking = [e for e in (health.baseError or []) if _is_blocking_dtc(e)]
-        if blocking:
-            detail = "; ".join(
-                f"0x{int(getattr(e, 'id', 0)):08X} "
-                f"{getattr(e, 'severity', '')} {getattr(e, 'description', '')}"
-                for e in blocking)
-            self._problems.append(f"底盘存在阻断性故障：{detail}")
+            return [f"读取底盘健康状态失败：{exc}"]
+        return [
+            f"0x{int(getattr(e, 'id', 0)):08X} "
+            f"{getattr(e, 'severity', '')} {getattr(e, 'description', '')}"
+            for e in (health.baseError or []) if _is_blocking_dtc(e)
+        ]
 
     # ------------------------------------------------------------------ 定位
     def _slam_status(self):
@@ -407,9 +415,23 @@ class NavigateToServer(Node):
         goal_handle.publish_feedback(feedback)
 
         deadline = time.monotonic() + timeout
+        start_xy = self._pose_xy(self._read_pose())
+        started_at = time.monotonic()
+        # 受阻检测锚点：从「最近一次确认有位移」的位置算起
+        stall_anchor = start_xy
+        stall_anchor_at = started_at
+        recoveries = 0
+        transient_retried = False
+
+        def redispatch(point: bool = False) -> str:
+            """重发原目标；point=True 时强制点对点（绕行后已离开轨道）。"""
+            if point:
+                return self._dispatch(poi, False, "")
+            return self._dispatch(poi, bool(req.use_track), str(req.track_id))
+
         while True:
             if self._shutdown or goal_handle.is_cancel_requested:
-                self._cancel_action(action_id)
+                self._cancel_and_settle(action_id)
                 goal_handle.canceled()
                 return self._result(False, "导航被取消", "canceled", distance)
 
@@ -423,19 +445,143 @@ class NavigateToServer(Node):
             if verdict == "success":
                 return self._arrived(goal_handle, poi, distance)
             if verdict == "failure":
+                elapsed = time.monotonic() - started_at
+                if (not transient_retried and not self._shutdown
+                        and not goal_handle.is_cancel_requested
+                        and elapsed <= _INSTANT_FAILURE_S
+                        and self._observed_no_movement(start_xy)):
+                    # 取消/停稳过渡期被底盘瞬拒：撤干净后重发一次
+                    transient_retried = True
+                    self.get_logger().warn(
+                        f"{poi} 下发 {elapsed:.2f}s 即被底盘拒绝（未观测到位移），"
+                        f"按瞬态重发一次：{status!r}")
+                    self._cancel_and_settle(action_id)
+                    action_id = redispatch()
+                    started_at = time.monotonic()
+                    start_xy = self._pose_xy(self._read_pose())
+                    stall_anchor = start_xy
+                    stall_anchor_at = started_at
+                    continue
                 message = f"底盘导航失败：{status!r}"
                 self.get_logger().error(message)
                 goal_handle.abort()
                 return self._result(False, message, "failed", distance)
 
-            remaining = self._distance_to(poi)
+            pose = self._read_pose()
+            remaining = self._distance_to(poi, pose)
+            now = time.monotonic()
+
+            if self.cfg.stall.enabled:
+                xy = self._pose_xy(pose)
+                if xy is not None:
+                    if stall_anchor is None:
+                        stall_anchor, stall_anchor_at = xy, now
+                    elif math.hypot(
+                        xy[0] - stall_anchor[0], xy[1] - stall_anchor[1]
+                    ) >= self.cfg.stall.min_progress_m:
+                        stall_anchor, stall_anchor_at = xy, now
+                stalled = (
+                    stall_anchor is not None
+                    and now - stall_anchor_at >= self.cfg.stall.detect_window_s
+                    and remaining > self.cfg.arrival_tolerance_m
+                )
+                if stalled:
+                    if recoveries >= self.cfg.stall.max_recoveries:
+                        self._cancel_and_settle(action_id)
+                        message = (
+                            f"{poi} 运动受阻：{now - stall_anchor_at:.1f}s 内位移不足 "
+                            f"{self.cfg.stall.min_progress_m:.2f}m，距目标 "
+                            f"{remaining:.2f}m，自恢复已用尽")
+                        self.get_logger().error(message)
+                        goal_handle.abort()
+                        return self._result(False, message, "blocked", distance)
+
+                    recoveries += 1
+                    self.get_logger().warn(
+                        f"{poi} 运动受阻：{now - stall_anchor_at:.1f}s 内位移不足 "
+                        f"{self.cfg.stall.min_progress_m:.2f}m，距目标 {remaining:.2f}m；"
+                        f"取消后后退并侧向绕行"
+                        f"（{recoveries}/{self.cfg.stall.max_recoveries}）")
+                    self._cancel_and_settle(action_id)
+                    feedback.phase = "detour"
+                    goal_handle.publish_feedback(feedback)
+
+                    # 回退前重新校验健康，避免带故障倒车
+                    faults = self._blocking_faults()
+                    if faults:
+                        message = (
+                            f"{poi} 受阻后底盘出现阻断性故障：{'; '.join(faults)}，"
+                            "本段放弃")
+                        self.get_logger().error(message)
+                        goal_handle.abort()
+                        return self._result(False, message, "blocked", distance)
+
+                    if not self._backoff(goal_handle, poi):
+                        if self._shutdown or goal_handle.is_cancel_requested:
+                            goal_handle.canceled()
+                            return self._result(False, "导航被取消", "canceled",
+                                                distance)
+                        if now + self.cfg.stall.retreat_rotate_timeout_s >= deadline:
+                            message = f"{poi} 后退失败且剩余时间不足，本段放弃"
+                            self.get_logger().error(message)
+                            goal_handle.abort()
+                            return self._result(False, message, "blocked", distance)
+                        # 后方也堵死：原地转向换个朝向，再按原方式重发
+                        if not self._rotate_in_place(goal_handle, poi):
+                            message = f"{poi} 受阻后退与原地转向均失败，本段放弃"
+                            self.get_logger().error(message)
+                            goal_handle.abort()
+                            return self._result(False, message, "blocked", distance)
+                        action_id = redispatch()
+                        self.get_logger().info(
+                            f"{poi} 受阻自恢复：已原地转向并重发原目标，"
+                            f"action_id={action_id}")
+                        started_at = time.monotonic()
+                        stall_anchor = self._pose_xy(self._read_pose())
+                        stall_anchor_at = time.monotonic()
+                        continue
+
+                    if self._shutdown or goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                        return self._result(False, "导航被取消", "canceled", distance)
+
+                    # 侧向绕行：第 1 次向左、第 2 次向右；同侧不行立刻换另一侧
+                    offsets = self.cfg.stall.detour_offsets_m
+                    offset_m = offsets[min(recoveries - 1, len(offsets) - 1)]
+                    side = 1 if recoveries % 2 == 1 else -1
+                    detoured = False
+                    for _ in range(2):
+                        outcome = self._detour(goal_handle, poi, offset_m, side)
+                        if outcome == "cancelled":
+                            goal_handle.canceled()
+                            return self._result(False, "导航被取消", "canceled",
+                                                distance)
+                        if outcome == "ok":
+                            detoured = True
+                            break
+                        side = -side
+                    if not detoured:
+                        message = f"{poi} 左右两侧绕行均失败，本段放弃"
+                        self.get_logger().error(message)
+                        goal_handle.abort()
+                        return self._result(False, message, "blocked", distance)
+
+                    # 已侧偏离开轨道：改点对点直奔点位，避免重新上轨又被同一障碍挡住
+                    action_id = redispatch(point=True)
+                    self.get_logger().info(
+                        f"{poi} 受阻自恢复：已绕行并重发原目标，action_id={action_id}")
+                    started_at = time.monotonic()
+                    stall_anchor = self._pose_xy(self._read_pose())
+                    stall_anchor_at = time.monotonic()
+                    continue
+
             if distance > 0.0:
                 feedback.progress = max(0.0, min(1.0, 1.0 - remaining / distance))
             feedback.phase = "moving"
             goal_handle.publish_feedback(feedback)
 
-            if time.monotonic() >= deadline:
-                self._cancel_action(action_id)
+            if now >= deadline:
+                self._cancel_and_settle(action_id)
                 message = f"导航超时（{timeout:.0f}s），已下发取消"
                 self.get_logger().error(message)
                 goal_handle.abort()
@@ -521,10 +667,11 @@ class NavigateToServer(Node):
             self.get_logger().warn(f"读取位姿失败：{exc}")
             return None
 
-    def _distance_to(self, poi: str) -> float:
+    def _distance_to(self, poi: str, pose=None) -> float:
         if self.dry_run:
             return 0.0
-        pose = self._read_pose()
+        if pose is None:
+            pose = self._read_pose()
         if not isinstance(pose, dict) or poi not in self._pois:
             return 0.0
         x, y = self._poi_xy(poi)
@@ -532,6 +679,202 @@ class NavigateToServer(Node):
             return math.hypot(x - float(pose["x"]), y - float(pose["y"]))
         except (KeyError, TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _pose_xy(pose):
+        if not isinstance(pose, dict):
+            return None
+        try:
+            return float(pose["x"]), float(pose["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _observed_no_movement(self, start_xy, threshold_m: float = 0.10) -> bool:
+        """动作下发至今是否完全没有位移；任一位姿不可用都按「已起步」保守处理。"""
+        if start_xy is None:
+            return False
+        current = self._pose_xy(self._read_pose())
+        if current is None:
+            return False
+        return math.hypot(
+            current[0] - start_xy[0], current[1] - start_xy[1]) < threshold_m
+
+    def _corridor_bounds(self) -> dict[str, tuple[float, float]]:
+        """走廊物理边界按 margin_m 内缩后的可行驶范围。"""
+        bounds: dict[str, tuple[float, float]] = {}
+        margin = self.cfg.corridor.margin_m
+        for axis in ("x", "y"):
+            raw = getattr(self.cfg.corridor, axis)
+            if raw is not None:
+                bounds[axis] = (raw[0] + margin, raw[1] - margin)
+        return bounds
+
+    def _point_range_error(self, x: float, y: float):
+        if self.cfg.range_limit.contains(x, y):
+            return None
+        return f"({x:.2f}, {y:.2f}) 超出 range_limit"
+
+    def _point_corridor_error(self, x: float, y: float):
+        for axis, (lo, hi) in self._corridor_bounds().items():
+            value = x if axis == "x" else y
+            if value < lo or value > hi:
+                return f"{axis}={value:.2f} 超出可行走廊 [{lo:.2f}, {hi:.2f}]"
+        return None
+
+    def _cancel_and_settle(self, action_id: str) -> None:
+        """取消并短暂等待动作退出 running，避免带着运动继续下一步。"""
+        self._cancel_action(action_id)
+        settle_deadline = time.monotonic() + 2.0
+        while time.monotonic() < settle_deadline:
+            try:
+                status = self._chassis.get_action_status(action_id)
+            except Exception:  # noqa: BLE001 - 查询失败不再等待
+                break
+            if _classify_action_status(status) != "running":
+                break
+            time.sleep(0.2)
+        try:
+            self._chassis.cancel_action()
+        except Exception:  # noqa: BLE001 - 全量取消失败不影响主流程
+            pass
+
+    def _wait_action(self, goal_handle, action_id: str,
+                     timeout_s: float) -> str:
+        """轮询底盘单步动作（后退/转向/绕行），返回 ok / failed / timeout / cancelled。"""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._shutdown or goal_handle.is_cancel_requested:
+                self._cancel_and_settle(action_id)
+                return "cancelled"
+            try:
+                status = self._chassis.get_action_status(action_id)
+            except Exception:  # noqa: BLE001 - 轮询抖动继续等
+                status = None
+            verdict = _classify_action_status(status)
+            if verdict == "success":
+                return "ok"
+            if verdict == "failure":
+                self.get_logger().warn(f"底盘动作失败：{status!r}")
+                return "failed"
+            time.sleep(self.poll)
+        self._cancel_and_settle(action_id)
+        return "timeout"
+
+    @staticmethod
+    def _action_id(response):
+        value = response.get("action_id") if isinstance(response, dict) else None
+        return None if value is None else str(value)
+
+    def _backoff(self, goal_handle, poi: str) -> bool:
+        """受阻后沿车头反向退一小段，给底盘留出重新起步的空间。"""
+        distance_mm = max(50, min(
+            5000, int(round(self.cfg.stall.backoff_m * 1000.0))))
+        self.get_logger().warn(
+            f"{poi} 受阻，后退 {distance_mm / 1000.0:.2f}m"
+            f"（限速 {self.cfg.stall.backoff_speed_mps:.2f} m/s）后重发原目标")
+        try:
+            rv = self._chassis.move_by(
+                direction=math.pi, distance=distance_mm, move_mode=0,
+                v=self.cfg.stall.backoff_speed_mps)
+        except Exception as exc:  # noqa: BLE001 - 后退失败只影响本段
+            self.get_logger().error(f"{poi} 后退指令下发失败：{exc}")
+            return False
+        action_id = self._action_id(rv)
+        if action_id is None:
+            self.get_logger().error(f"{poi} 后退指令未返回 action_id：{rv!r}")
+            return False
+        outcome = self._wait_action(
+            goal_handle, action_id, self.cfg.stall.backoff_timeout_s)
+        if outcome != "ok":
+            self.get_logger().warn(f"{poi} 后退未成功（{outcome}）")
+            return False
+        self.get_logger().info(f"{poi} 已后退 {distance_mm / 1000.0:.2f}m")
+        return True
+
+    def _rotate_in_place(self, goal_handle, poi: str) -> bool:
+        """后退失败时的脱困动作：原地左右交替转向，让 AEB/规划重新判断。"""
+        angle = math.radians(self.cfg.stall.retreat_rotate_deg)
+        direction = angle if self._rotate_turns % 2 == 0 else -angle
+        self._rotate_turns += 1
+        direction = max(-math.pi, min(math.pi, direction))
+        self.get_logger().warn(
+            f"{poi} 后退失败，原地转向 {math.degrees(direction):+.0f}° 脱困")
+        try:
+            rv = self._chassis.move_by(
+                direction=direction, distance=0, move_mode=1,
+                w=self.cfg.stall.retreat_rotate_speed_rad_s)
+        except Exception as exc:  # noqa: BLE001 - 转向失败只影响本段
+            self.get_logger().error(f"{poi} 原地转向指令下发失败：{exc}")
+            return False
+        action_id = self._action_id(rv)
+        if action_id is None:
+            self.get_logger().error(f"{poi} 原地转向未返回 action_id：{rv!r}")
+            return False
+        outcome = self._wait_action(
+            goal_handle, action_id, self.cfg.stall.retreat_rotate_timeout_s)
+        if outcome != "ok":
+            self.get_logger().warn(f"{poi} 原地转向未成功（{outcome}）")
+            return False
+        self.get_logger().info(f"{poi} 原地转向脱困完成")
+        return True
+
+    def _detour(self, goal_handle, poi: str, offset_m: float, side: int) -> str:
+        """从当前位置向目标连线的左侧(side=+1)/右侧(side=-1)平移 offset_m。
+
+        只做平移（flags=0），不改朝向；落点先过软限位与走廊校验。
+        """
+        pose = self._read_pose()
+        xy = self._pose_xy(pose)
+        if xy is None:
+            self.get_logger().warn(f"{poi} 绕行失败：无法读取当前位姿")
+            return "failed"
+        tx, ty = self._poi_xy(poi)
+        dx, dy = tx - xy[0], ty - xy[1]
+        norm = math.hypot(dx, dy)
+        if norm < 1e-6:
+            self.get_logger().warn(f"{poi} 绕行失败：已在目标点上，无绕行方向")
+            return "failed"
+        # 前进方向的左侧单位向量为 (-dy, dx)
+        ux, uy = -dy / norm, dx / norm
+        nx = xy[0] + side * offset_m * ux
+        ny = xy[1] + side * offset_m * uy
+        label = "左" if side > 0 else "右"
+        reason = self._point_range_error(nx, ny)
+        if reason is not None:
+            self.get_logger().warn(
+                f"{poi} 绕行点 ({nx:.2f}, {ny:.2f}) 超出软限位（{reason}），"
+                f"放弃{label}侧")
+            return "failed"
+        corridor_error = self._point_corridor_error(nx, ny)
+        if corridor_error is not None:
+            self.get_logger().warn(
+                f"{poi} 绕行点 ({nx:.2f}, {ny:.2f}) 超出可行走廊"
+                f"（{corridor_error}），放弃{label}侧")
+            return "failed"
+        yaw = 0.0
+        if isinstance(pose, dict) and pose.get("yaw") is not None:
+            yaw = float(pose["yaw"])
+        self.get_logger().warn(
+            f"{poi} 受阻绕行：向{label}侧平移 {offset_m:.2f}m "
+            f"到 ({nx:.2f}, {ny:.2f})")
+        try:
+            rv = self._chassis.move_to(nx, ny, yaw, flags=0)
+        except Exception as exc:  # noqa: BLE001 - 绕行失败交给上层换侧
+            self.get_logger().error(f"{poi} 绕行指令下发失败：{exc}")
+            return "failed"
+        action_id = self._action_id(rv)
+        if action_id is None:
+            self.get_logger().error(f"{poi} 绕行指令未返回 action_id：{rv!r}")
+            return "failed"
+        outcome = self._wait_action(
+            goal_handle, action_id, self.cfg.stall.detour_timeout_s)
+        if outcome == "ok":
+            self.get_logger().info(f"{poi} 侧向绕行到位")
+            return "ok"
+        if outcome == "cancelled":
+            return "cancelled"
+        self.get_logger().warn(f"{poi} 侧向绕行未成功（{outcome}）")
+        return "failed"
 
     def _cancel_action(self, action_id: str) -> None:
         try:
