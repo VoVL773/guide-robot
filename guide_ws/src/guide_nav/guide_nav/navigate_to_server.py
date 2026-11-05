@@ -56,9 +56,9 @@ _TERMINAL_FAIL = {
 # 6=重定位中、7=加载地图、8=等待传感器属于底盘正在恢复，重复下发只会互相打断。
 _RELOCALIZE_TRIGGER_STATUS = frozenset({1, 2, 3, 5})
 
-# 动作刚下发就被底盘判 failed 且从未起步的观察窗口：
-# 这通常是「取消后重发」撞上固件停稳过渡期的瞬态拒绝，值得重发一次。
-_INSTANT_FAILURE_S = 1.5
+# 动作被判 failed 且「从未起步」时，视为固件停稳/上轨过渡期的瞬态拒绝：
+# 撤干净、等一拍再原样重发一次，避免一次拒绝就终止整轮导览。
+_REDISPATCH_SETTLE_S = 1.0
 
 
 def _unwrap_list(rv, *keys):
@@ -90,6 +90,27 @@ def _classify_action_status(status) -> str:
             if text in _TERMINAL_FAIL:
                 return "failure"
     return "running"
+
+
+def _never_started(status) -> bool:
+    """底盘返回 failed 时，判断这条动作是否「从未起步」。
+
+    固件在停稳/取消过渡期拒绝新任务时，会直接返回 failed，且距离与耗时
+    都是 0；真正跑了一段才失败的动作这些字段非 0，不能按瞬态重试。
+    """
+    if not isinstance(status, dict):
+        return False
+    seen = False
+    for key in ("distance_time", "distance_remaining", "progress"):
+        if key not in status:
+            continue
+        seen = True
+        try:
+            if float(status[key]) != 0.0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return seen
 
 
 def _is_blocking_dtc(entry) -> bool:
@@ -451,14 +472,21 @@ class NavigateToServer(Node):
                 elapsed = time.monotonic() - started_at
                 if (not transient_retried and not self._shutdown
                         and not goal_handle.is_cancel_requested
-                        and elapsed <= _INSTANT_FAILURE_S
-                        and self._observed_no_movement(start_xy)):
-                    # 取消/停稳过渡期被底盘瞬拒：撤干净后重发一次
+                        and _never_started(status)):
+                    # 停稳/上轨过渡期被底盘拒绝（从未起步）：等一拍后原样重发
                     transient_retried = True
                     self.get_logger().warn(
-                        f"{poi} 下发 {elapsed:.2f}s 即被底盘拒绝（未观测到位移），"
-                        f"按瞬态重发一次：{status!r}")
+                        f"{poi} 下发 {elapsed:.2f}s 被判 failed 且从未起步，"
+                        f"撤干净后 {_REDISPATCH_SETTLE_S:.1f}s 重发一次：{status!r}")
                     self._cancel_and_settle(action_id)
+                    settle_end = time.monotonic() + _REDISPATCH_SETTLE_S
+                    while (time.monotonic() < settle_end
+                           and not self._shutdown
+                           and not goal_handle.is_cancel_requested):
+                        time.sleep(0.1)
+                    if self._shutdown or goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                        return self._result(False, "导航被取消", "canceled", distance)
                     self._apply_motion_limits(str(req.track_id), poi)
                     action_id = redispatch()
                     started_at = time.monotonic()
@@ -694,16 +722,6 @@ class NavigateToServer(Node):
             return float(pose["x"]), float(pose["y"])
         except (KeyError, TypeError, ValueError):
             return None
-
-    def _observed_no_movement(self, start_xy, threshold_m: float = 0.10) -> bool:
-        """动作下发至今是否完全没有位移；任一位姿不可用都按「已起步」保守处理。"""
-        if start_xy is None:
-            return False
-        current = self._pose_xy(self._read_pose())
-        if current is None:
-            return False
-        return math.hypot(
-            current[0] - start_xy[0], current[1] - start_xy[1]) < threshold_m
 
     def _corridor_bounds(self) -> dict[str, tuple[float, float]]:
         """走廊物理边界按 margin_m 内缩后的可行驶范围。"""
