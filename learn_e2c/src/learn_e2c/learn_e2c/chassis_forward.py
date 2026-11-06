@@ -1,4 +1,4 @@
-"""底盘「前进一段时间」的公共实现，供 move_forward / remote_trigger 两个节点复用。
+"""底盘「前进一段时间」的公共实现，供 move_forward 节点使用。
 
 底盘接口是 REST 异步任务: move_by 只负责下发，动作是否完成要轮询
 get_action_status。这里把「下发 -> 轮询 -> 超时取消」收敛成一个函数。

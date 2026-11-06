@@ -11,7 +11,6 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/launch", [
             "launch/move_forward.launch.py",
-            "launch/remote_trigger.launch.py",
         ]),
     ],
     install_requires=["setuptools"],
@@ -23,7 +22,6 @@ setup(
     entry_points={
         "console_scripts": [
             "move_forward = learn_e2c.move_forward_node:main",
-            "remote_trigger = learn_e2c.remote_trigger_node:main",
         ],
     },
 )
