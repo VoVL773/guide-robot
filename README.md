@@ -1,130 +1,107 @@
-# guide\_robot —— 机器人导览（介绍）任务
+# guide_robot —— 导览机器人「小郑」
 
-同一套底盘 POI 服务端和轨道，但**点位不同**：
-点位名称、参观顺序、讲解词全部由 YAML 驱动，代码里没有任何 `POI_xx` 常量。
-用户在地图上标记好 POI 后，只改两个 YAML 即可运行。
+基于 ROS 2 Jazzy、Knewbot 底盘与千问语言模型的展厅语音导览项目。机器人接收语音或文本，理解访客意图，按地图点位带路，到达后播报，并可返回待命点。
+
+## 项目状态
+
+**已完整跑通，当前场馆各点位导航正常，语音与语言模块正常。**
+
+截至 2026-11-17，项目负责人确认完整业务流程已实际运行通过：
+
+- 各点位导航、主线逐点通行及往返流程正常。
+- 语音识别、地点意图理解、千问对话与语音播报正常。
+- 「接收请求 → 理解目的地 → 导航带路 → 到点播报 → 返回待命点」流程已跑通。
+
+当前地图待命点为「乐知院」（地图名称「乐知教育」）。本状态依据项目负责人最新实机反馈；历史测试数据见[交付文档](docs/导览机器人交付文档.md)。
+
+## 当前架构
+
+当前交付使用单个 ROS 2 包 `guide_voice`，由 `VoiceChatNode` 统一编排对话与导航。
+
+```mermaid
+flowchart LR
+    A[麦克风 / ASR / 文本输入] --> B[VoiceChatNode 会话与意图处理]
+    B <--> C[千问语言模型]
+    B --> D[PlaceBook 地点与路线配置]
+    D --> E[Navigator 逐点导航]
+    E <--> F[Knewbot 底盘 REST]
+    G[FrontGuard 深度防撞] --> E
+    B --> H[TTS 语音播报]
+```
+
+`web_monitor` 是独立的只读监测看板，不参与控制。点位别名、顺序与待命点来自 YAML，实际坐标以底盘地图为准。
 
 ## 目录
 
+```text
+guide_robot/
+├── guide_ws/src/guide_voice/
+│   ├── guide_voice/
+│   │   ├── voice_chat_node.py    # 会话状态机、意图处理与导航编排
+│   │   ├── mic_asr.py            # 麦克风采集、VAD 与 Whisper 识别
+│   │   ├── qwen.py               # 千问模型客户端
+│   │   ├── places.py             # 地点别名、主线与支线
+│   │   ├── navigation.py         # 底盘导航、定位与异常处理
+│   │   └── front_guard.py        # 深度图前向防撞
+│   ├── config/places.yaml        # 场馆点位配置
+│   ├── launch/voice_chat.launch.py
+│   └── test/test_navigation.py
+├── web_monitor/                  # 只读监测服务与网页
+└── docs/导览机器人交付文档.md      # 架构、部署、接口与验证记录
 ```
-guide_ws/src/
-├── guide_interfaces/      NavigateTo / Speak Action，SetHeadPose / GuideCommand 服务
-├── guide_core/            YAML 加载与校验（RobotForge reusable_model.io.yaml_config）
-├── guide_nav/             导航服务端（底盘 REST，AEB/限速/定位/到点容差）
-├── guide_head/            头部服务端（/head/cmd，回中与朝向）
-├── guide_voice/           语音服务端（Speak Action -> 平台 TTS）
-└── guide_orchestrator/    编排（唯一指挥者）+ 配置 + 一键 launch
-    ├── config/guide_points.yaml   点位顺序、轨道、限速、停留、容差
-    └── config/guide_script.yaml   每个点位的讲解词与头部朝向
-```
 
-## 当前进度
+## 构建与启动
 
-- ✅ 第一步：起点 `POI_START` → 沿 `track_line_1000` 依次到 `POI_01`\~`POI_05`，
-  到点播报「到达点位N」，结束停在最后一个点位（地图只有这一条轨道，没有返程）
-- ⏳ 下一步：头部回中/朝向（`guide_head`，launch 加 `enable_head:=true`）、正式讲解词
-
-点位与轨道名称来自地图文件 `20261105_080739.bag`，已填入 `guide_points.yaml`。
-
-## 构建
+以下命令在**机器人端**执行，部署目录为 `/home/nvidia/guide_robot`。本地文档维护目录为 `/home/vovl773/guide_robot`。
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /home/nvidia/xos/setup.bash          # interaction_msgs / ros2_bridge_msgs
+source /home/nvidia/xos/setup.bash
 cd /home/nvidia/guide_robot/guide_ws
-colcon build --symlink-install
+colcon build --symlink-install --packages-select guide_voice
 source install/setup.bash
+ros2 launch guide_voice voice_chat.launch.py
 ```
 
-依赖说明：
+依赖机器人已有的 `interaction_msgs`、`lyre_msgs`、语音服务与模型接口。底盘 SDK 默认从 `/home/nvidia/robot_controller/src` 加载，可通过 `ROBOT_CONTROLLER_SRC` 覆盖。
 
-- `robot_controller` 是普通 Python 包（未被 colcon 安装），导航节点通过
-  `sys.path` 注入 `/home/nvidia/robot_controller/src`（可用 `ROBOT_CONTROLLER_SRC` 覆盖）。
-- RobotForge 通过 `ROBOTFORGE_SRC` 注入，默认
-  `/home/nvidia/greeting-main/packages/reusable_model/src`。
-
-> 在 Trae/IDE 内置终端构建时，若 cmake 报 `GLIBCXX_3.4.32 not found`，是 IDE 注入的
-> 库路径覆盖了系统库，构建前先清掉：
-> `export LD_LIBRARY_PATH=$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v trae-cn-server | paste -sd:)`
-
-## 标记点位（必做）
-
-1. 在底盘/App 里把车摆到讲解位置，建点，记录 POI 名称；
-2. 编辑 `src/guide_orchestrator/config/guide_points.yaml`：
-   - `start_poi`：起点名称；
-   - `poi_order`：按参观顺序排列的讲解点名称；
-   - `tracks.outbound`：串联这些点的轨道名；`tracks.return`：返程轨道（可留空）；
-3. 在 `src/guide_script.yaml` 里按同名点位填写 `text`（及可选的 `head_yaw` / `head_pitch`）；
-4. 重新 `colcon build`（或直接改 `install/.../share/.../config` 下的文件后重启节点）。
-
-启动时导航节点会做只读校验：点位/轨道不存在、`poi_order` 重复、`start_poi`
-出现在顺序里等，都会打印明确原因并拒绝所有 goal，**不会崩溃**。
-
-## 先空跑（默认 dry\_run）
+仅启用文本输入时，在已加载上述环境的终端执行：
 
 ```bash
-ros2 launch guide_orchestrator guide.launch.py                    # dry_run:=true
+ros2 run guide_voice voice_chat --ros-args -p enable_mic:=false
 ```
 
-dry\_run 行为：不连底盘、不下发运动、不写限速、不发头部指令、不调 TTS，
-导航按固定耗时模拟到点，语音只打印文本。用于验证顺序、讲解词与状态机。
+## 使用示例
 
-观察状态：
+可以直接说「带我去跆拳道馆」「回乐知院」；到达后说「没事了」返回待命点。也可通过文本话题输入：
 
 ```bash
-ros2 topic echo /guide/status
+ros2 topic pub --once /guide_voice/chat std_msgs/msg/String "{data: '带我去跆拳道馆'}"
+ros2 topic pub --once /guide_voice/chat std_msgs/msg/String "{data: '回乐知院'}"
 ```
 
-## 实机运行
+当前主线物理顺序：**乐知教育 → 核心力量跑酷 → 创想谷 → 厕所 → 跆拳道馆**。返程按相反顺序逐点经过。导航期间不接受新的语音目标，播报期间暂停麦克风识别，避免自身播报被再次识别。
+
+换场馆时修改 `guide_ws/src/guide_voice/config/places.yaml` 的 `aliases`、`main_line`、`branches` 与 `standby`，并核对底盘地图点位后重新部署、验证。
+
+## 只读监测
+
+在机器人端另开终端：
 
 ```bash
-ros2 launch guide_orchestrator guide.launch.py dry_run:=false
+cd /home/nvidia/guide_robot/web_monitor
+bash start_monitor.sh --port 8765
 ```
 
-实机时导航节点会：
+浏览器访问机器人的 `8765` 端口。监测内容包括主机资源、ROS 节点、底盘电量、相机与日志，详见[监测说明](web_monitor/README.md)。
 
-- 校验定位；定位异常且 `relocalize.enabled=true` 时按 `start_poi` 位姿自动重定位；
-- 开启 AEB，按 `speed` 设置限速，退出时恢复原限速；
-- 到点后校验实际位姿与 POI 坐标偏差（`arrival_tolerance_m`）。
+## 测试与交付记录
 
-## 运行中控制
+导航逻辑测试在机器人端执行，不下发真实底盘运动：
 
 ```bash
-# start / pause / resume / stop / goto
-ros2 service call /guide/command guide_interfaces/srv/GuideCommand \
-  "{command: 'pause'}"
-ros2 service call /guide/command guide_interfaces/srv/GuideCommand \
-  "{command: 'goto', poi_name: 'POI_06'}"
-
-# 单独调试某一环
-ros2 action send_goal /guide/navigate_to guide_interfaces/action/NavigateTo \
-  "{poi_name: 'POI_05', use_track: false, track_id: ''}"
-ros2 action send_goal /guide/speak guide_interfaces/action/Speak \
-  "{text: '测试播报', interrupt: true}"
+cd /home/nvidia/guide_robot/guide_ws/src/guide_voice
+python3 -m unittest discover -s test -v
 ```
 
-命令语义：
-
-- `pause` / `resume` 在**步骤边界**生效（当前导航/播报会走完）；
-- `stop` 立即取消当前目标并终止导览；
-- `goto` 只能从 idle 状态启动，从指定点位开始并继续后续点位（不会先回起点）。
-
-## 实机注意
-
-- **TTS**：`audio_id` 必须是 `audio_config.json` 里开启 stop 权限的文本实体
-  （当前 `audio_guide`）；否则 cancel 无法真正打断音频。
-- **头部**：`pitch` 正值为低头，抬头填负值；限位 ±26°/±25°/±90°，
-  节点内部会再次 clamp。关节 1（roll）固定为 0。
-- **POI 坐标**：不在本工程维护；以底盘 POI 服务端为唯一真源，避免两份坐标漂移。
-- **语音与头部**的服务端都各自做并发互斥，编排层是唯一调用方，不要绕过编排
-  直接并发调用，否则会出现两句讲解叠播。
-
-## 测试
-
-```bash
-cd src/guide_core
-PYTHONPATH=. python3 -m pytest test -q
-```
-
-覆盖：空配置、正常配置、重复点位、起点混入顺序、未知配置项、讲解词默认值、
-角度归一化。
+本次文档更新没有重新执行测试或实车运行。历史测试、现场参数、接口契约与功能边界见[导览机器人交付文档](docs/导览机器人交付文档.md)。
