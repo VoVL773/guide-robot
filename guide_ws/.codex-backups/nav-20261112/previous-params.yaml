@@ -1,0 +1,6 @@
+/**:
+  ros__parameters:
+    greet_text: ''
+    qwen_api_key: EMPTY
+    qwen_base_url: http://120.48.75.178:7006/v1
+    qwen_model: Qwen3.5-122B-A10B

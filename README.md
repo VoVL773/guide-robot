@@ -1,6 +1,6 @@
-# guide_robot —— 机器人导览（介绍）任务
+# guide\_robot —— 机器人导览（介绍）任务
 
-与消防巡检共用同一张底盘地图、同一套底盘 POI 服务端和轨道，但**点位不同**：
+同一套底盘 POI 服务端和轨道，但**点位不同**：
 点位名称、参观顺序、讲解词全部由 YAML 驱动，代码里没有任何 `POI_xx` 常量。
 用户在地图上标记好 POI 后，只改两个 YAML 即可运行。
 
@@ -20,7 +20,7 @@ guide_ws/src/
 
 ## 当前进度
 
-- ✅ 第一步：起点 `POI_START` → 沿 `track_line_1000` 依次到 `POI_01`~`POI_05`，
+- ✅ 第一步：起点 `POI_START` → 沿 `track_line_1000` 依次到 `POI_01`\~`POI_05`，
   到点播报「到达点位N」，结束停在最后一个点位（地图只有这一条轨道，没有返程）
 - ⏳ 下一步：头部回中/朝向（`guide_head`，launch 加 `enable_head:=true`）、正式讲解词
 
@@ -37,6 +37,7 @@ source install/setup.bash
 ```
 
 依赖说明：
+
 - `robot_controller` 是普通 Python 包（未被 colcon 安装），导航节点通过
   `sys.path` 注入 `/home/nvidia/robot_controller/src`（可用 `ROBOT_CONTROLLER_SRC` 覆盖）。
 - RobotForge 通过 `ROBOTFORGE_SRC` 注入，默认
@@ -59,13 +60,13 @@ source install/setup.bash
 启动时导航节点会做只读校验：点位/轨道不存在、`poi_order` 重复、`start_poi`
 出现在顺序里等，都会打印明确原因并拒绝所有 goal，**不会崩溃**。
 
-## 先空跑（默认 dry_run）
+## 先空跑（默认 dry\_run）
 
 ```bash
 ros2 launch guide_orchestrator guide.launch.py                    # dry_run:=true
 ```
 
-dry_run 行为：不连底盘、不下发运动、不写限速、不发头部指令、不调 TTS，
+dry\_run 行为：不连底盘、不下发运动、不写限速、不发头部指令、不调 TTS，
 导航按固定耗时模拟到点，语音只打印文本。用于验证顺序、讲解词与状态机。
 
 观察状态：
@@ -81,6 +82,7 @@ ros2 launch guide_orchestrator guide.launch.py dry_run:=false
 ```
 
 实机时导航节点会：
+
 - 校验定位；定位异常且 `relocalize.enabled=true` 时按 `start_poi` 位姿自动重定位；
 - 开启 AEB，按 `speed` 设置限速，退出时恢复原限速；
 - 到点后校验实际位姿与 POI 坐标偏差（`arrival_tolerance_m`）。
@@ -102,6 +104,7 @@ ros2 action send_goal /guide/speak guide_interfaces/action/Speak \
 ```
 
 命令语义：
+
 - `pause` / `resume` 在**步骤边界**生效（当前导航/播报会走完）；
 - `stop` 立即取消当前目标并终止导览；
 - `goto` 只能从 idle 状态启动，从指定点位开始并继续后续点位（不会先回起点）。

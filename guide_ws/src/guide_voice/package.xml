@@ -3,14 +3,16 @@
 <package format="3">
   <name>guide_voice</name>
   <version>0.1.0</version>
-  <description>导览语音服务端：Speak Action -> 平台 TTS。</description>
+  <description>展厅导览机器人：语音对话（本地千问）与按点位导航</description>
   <maintainer email="nvidia@example.com">nvidia</maintainer>
   <license>Apache-2.0</license>
 
-  <depend>rclpy</depend>
-  <depend>guide_core</depend>
-  <depend>guide_interfaces</depend>
-  <depend>interaction_msgs</depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>lyre_msgs</exec_depend>
+  <exec_depend>interaction_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
