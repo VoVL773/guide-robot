@@ -2,10 +2,9 @@
 guide_ws/build/
 guide_ws/install/
 guide_ws/log/
-learn_e2c/build/
-learn_e2c/install/
-learn_e2c/log/
-
+learn/
+arm_demo/
+.vscode/
 # Python 缓存
 __pycache__/
 *.pyc
