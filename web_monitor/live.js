@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 let latest = null, connected = false, paused = false, logs = [], busy = false, logFilter = 'all';
 let cameraBusy = false, cameraURL = null, selectedFrame = 'color';
-let placesKey = '', pendingConfirm = null;
+let placesKey = '', pendingConfirm = null, nodeSignature = null;
 
 const HISTORY_MAX = 120;
 const history = {cpu: [], temp: [], mem: [], batt: [], nodes: [], dist: []};
@@ -13,7 +13,7 @@ const pushHistory = (key, value) => {
   if (list.length > HISTORY_MAX) list.shift();
 };
 
-const viewTitles = {overview: '总览', status: '设备状态', maps: '地图配置'};
+const viewTitles = {overview: '总览', status: '设备状态', nodes: '节点状态', maps: '地图配置'};
 
 function goView(name) {
   document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== name);
@@ -21,6 +21,7 @@ function goView(name) {
   $('#view-title').textContent = viewTitles[name] || '';
 }
 document.querySelectorAll('.nav button').forEach(b => b.addEventListener('click', () => goView(b.dataset.page)));
+$('#node-filter').addEventListener('input', renderNodes);
 
 function age(at) { return at ? Math.max(0, Date.now() / 1000 - at) : Infinity; }
 function fresh(sample, seconds = 8) { return connected && sample && age(sample.at) < seconds; }
@@ -539,6 +540,123 @@ function renderService() {
   });
 }
 
+function fmtDuration(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '—';
+  if (sec < 60) return Math.floor(sec) + ' 秒';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分';
+  return Math.floor(sec / 3600) + ' 小时 ' + Math.floor(sec % 3600 / 60) + ' 分';
+}
+
+function renderNodes() {
+  const ros = latest?.ros;
+  const graph = connected && ros?.available && age(ros.graph_at) < 12;
+  const current = new Set(graph ? ros.nodes : []);
+  const seen = ros?.node_seen || {};
+  const now = Date.now() / 1000;
+
+  const all = [...new Set([...current, ...Object.keys(seen)])].map(name => {
+    const parts = name.split('/');
+    const short = parts.pop() || '/';
+    const ns = parts.join('/') || '/';
+    const info = seen[name] || {};
+    return {
+      name, short, ns,
+      online: current.has(name),
+      first: Number(info.first_seen),
+      last: Number(info.last_seen)
+    };
+  });
+  const online = all.filter(n => n.online);
+  const offline = all.filter(n => !n.online);
+  const namespaces = new Set(online.map(n => n.ns));
+
+  const stats = $('#node-stats');
+  stats.replaceChildren();
+  [['在线', online.length], ['最近退出', offline.length], ['命名空间', namespaces.size]].forEach(([label, value]) => {
+    const el = document.createElement('span');
+    el.textContent = label + ' ' + value;
+    stats.append(el);
+  });
+  $('#nodes-note').textContent = graph
+    ? 'ROS ' + ros.nodes.length + ' 个节点 · ' + ros.topics.length + ' 个话题 · 5 秒刷新'
+    : 'ROS 未连接';
+
+  const query = ($('#node-filter').value || '').trim().toLowerCase();
+  const rows = all
+    .filter(n => !query || n.name.toLowerCase().includes(query))
+    .sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
+
+  const table = $('#node-table');
+  const signature = rows.map(n => n.name + '|' + (n.online ? 1 : 0)).join(',') + '#' + (graph ? 1 : 0);
+  if (signature === nodeSignature) {
+    // 节点集合没变时只刷新时间列，避免每 2 秒重建列表导致滚动位置丢失
+    table.querySelectorAll('.node-row:not(.head)').forEach((row, index) => {
+      const n = rows[index];
+      if (!n) return;
+      const up = row.querySelector('.node-up');
+      const last = row.querySelector('.node-last');
+      if (up) up.textContent = n.online ? fmtDuration(now - n.first) : '—';
+      if (last) last.textContent = n.online
+        ? '当前在线'
+        : (Number.isFinite(n.last) ? fmtDuration(now - n.last) + '前' : '—');
+    });
+    return;
+  }
+  nodeSignature = signature;
+  table.replaceChildren();
+  if (!rows.length) {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = graph ? '没有匹配的节点' : 'ROS 图未连接，暂无节点信息';
+    table.append(p);
+    return;
+  }
+
+  const head = document.createElement('div');
+  head.className = 'node-row head';
+  [['状态', 'node-state'], ['节点', 'node-name'], ['命名空间', 'node-ns'],
+    ['在线时长', 'node-up'], ['最近在线', 'node-last']].forEach(([text, cls]) => {
+    const el = document.createElement('span');
+    el.className = cls;
+    el.textContent = text;
+    head.append(el);
+  });
+  table.append(head);
+
+  rows.forEach(n => {
+    const row = document.createElement('div');
+    row.className = 'node-row';
+
+    const state = document.createElement('span');
+    state.className = 'stat-pill ' + (n.online ? 'ok' : 'off');
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    state.append(dot, n.online ? '运行中' : '已退出');
+
+    const name = document.createElement('span');
+    name.className = 'node-name';
+    name.textContent = n.short;
+    name.title = n.name;
+
+    const ns = document.createElement('span');
+    ns.className = 'node-ns';
+    ns.textContent = n.ns;
+
+    const up = document.createElement('span');
+    up.className = 'node-up node-time';
+    up.textContent = n.online ? fmtDuration(now - n.first) : '—';
+
+    const last = document.createElement('span');
+    last.className = 'node-last node-time';
+    last.textContent = n.online
+      ? '当前在线'
+      : (Number.isFinite(n.last) ? fmtDuration(now - n.last) + '前' : '—');
+
+    row.append(state, name, ns, up, last);
+    table.append(row);
+  });
+}
+
 function card({label, pill, tone, value, unit, sub, bar, barTone, text, spark}) {
   const box = document.createElement('div');
   box.className = 'stat-card';
@@ -764,6 +882,7 @@ function update() {
   renderPlaces();
   renderMap();
   renderStatusLists();
+  renderNodes();
 
   const nodeRunning = Boolean(latest?.node?.running);
   $('#send-button').disabled = !connected || !nodeRunning || !(latest?.places || []).length;

@@ -105,7 +105,7 @@ class State:
         self.logs = collections.deque(maxlen=200)
         self.seq = 0
         self.host = {}
-        self.ros = {'available': False, 'error': 'ROS 正在连接', 'nodes': [], 'topics': [], 'services': [], 'graph_at': None}
+        self.ros = {'available': False, 'error': 'ROS 正在连接', 'nodes': [], 'topics': [], 'services': [], 'node_seen': {}, 'graph_at': None}
         self.samples = {}
         self.frames = {}
         self.stopping = threading.Event()
@@ -118,6 +118,8 @@ class State:
         self.publisher = None
         self.publish_lock = threading.Lock()
         self.map_info = None
+        # 节点首次/最近出现时间：name -> {'first_seen': ts, 'last_seen': ts}
+        self.node_seen = {}
         # 底盘点位坐标：名字 -> {x, y}，用于示意图上的位置换算
         self.pois = {}
         self.add_log('INFO', 'monitor', '监测已启动；仅开放启动节点与快捷导航两个确认操作')
@@ -424,8 +426,19 @@ def ros_worker(state):
                 topics = dict(node.get_topic_names_and_types())
                 services = [name for name, types in node.get_service_names_and_types()]
                 with state.lock:
+                    now = time.time()
+                    for name in nodes:
+                        seen = state.node_seen.get(name)
+                        if seen is None:
+                            state.node_seen[name] = {'first_seen': now, 'last_seen': now}
+                        else:
+                            seen['last_seen'] = now
+                    for name, seen in list(state.node_seen.items()):
+                        if now-seen['last_seen'] > 900:
+                            del state.node_seen[name]
+                    node_seen = {name: dict(seen) for name, seen in state.node_seen.items()}
                     was_available = state.ros['available']
-                    state.ros = {'available': True, 'error': None, 'nodes': nodes, 'topics': sorted(topics), 'services': sorted(services), 'graph_at': time.time()}
+                    state.ros = {'available': True, 'error': None, 'nodes': nodes, 'topics': sorted(topics), 'services': sorted(services), 'node_seen': node_seen, 'graph_at': now}
                 if not was_available:
                     state.add_log('INFO', 'monitor.ros', 'ROS 图已连接；仅订阅已有状态与图像话题')
                 color_topic = '/ob_camera_head/color/image_raw/compressed' if '/ob_camera_head/color/image_raw/compressed' in topics else '/ob_camera_head/color/image_raw'
