@@ -13,6 +13,37 @@
 - **导航保护**：底盘健康检查、定位门控、深度相机前向防撞及取消确认。
 - **Web 工作台**：相机、任务、位姿、设备与 ROS 节点状态，以及需确认的控制入口。
 
+## Web 界面预览
+
+以下为现场工作台截图，展示总览、设备状态、节点状态和地图配置四个视图；图中数值为截图时刻的状态。
+
+**总览**：相机画面、当前任务、地图缩略图、节点启停、快捷指令与事件流。
+
+![Web 工作台总览](docs/images/web-overview.jpg)
+
+<details>
+<summary>设备状态：主机资源、底盘电量、ROS 与硬件状态、性能趋势</summary>
+
+![Web 工作台设备状态](docs/images/web-device-status.jpg)
+
+</details>
+
+<details>
+<summary>节点状态：ROS 节点列表、命名空间、在线时长与过滤查询</summary>
+
+![Web 工作台节点状态](docs/images/web-node-status.jpg)
+
+</details>
+
+<details>
+<summary>地图配置：运行示意图、机器人位置与导览目的地</summary>
+
+![Web 工作台地图配置](docs/images/web-map.jpg)
+
+</details>
+
+运行示意图展示沿线位置与大致进度，不等同于实际场地几何地图。启动及接口说明见 [Web 工作台文档](web_monitor/README.md)。
+
 ## 当前架构
 
 当前使用单个 ROS 2 包 `guide_voice`，由 `VoiceChatNode` 统一编排对话与导航。
