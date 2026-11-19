@@ -1,6 +1,8 @@
 # 小郑 · 导览工作台
 
-机器人端独立目录：`/home/nvidia/guide_robot/web_monitor`。监测进程与现有导览、导航、相机及底盘进程相互独立；不改动这些程序、配置或启动项。
+Web 工作台独立采集主机、ROS、相机与底盘状态，并提供需确认的语音节点启停、地点导航和文本指令入口。原机器人部署目录为 `/home/nvidia/guide_robot/web_monitor`；它通过 ROS 文本话题请求导览，不直接调用底盘运动 SDK。
+
+返回 [项目首页](../README.md) · [部署与使用](../docs/部署与使用.md)
 
 ## 启动
 
@@ -9,7 +11,20 @@ cd /home/nvidia/guide_robot/web_monitor
 bash start_monitor.sh --port 8765
 ```
 
-## 浏览器访问 `http://192.168.21.19:8765/`。只需机器人上已有的 Python、psutil、PyYAML、OpenCV、NumPy 和 ROS 2 Jazzy。
+浏览器访问 `http://机器人IP:8765/`。依赖 Python、psutil、PyYAML、OpenCV、NumPy 和 ROS 2 Jazzy，以及运行设备话题所需的平台消息定义。
+
+默认监听 `0.0.0.0`，没有登录鉴权或 HTTPS，只适合受控局域网。请求体中的 `confirm` 是操作确认标记，不是身份认证。仅本机访问时可使用 `bash start_monitor.sh --bind 127.0.0.1 --port 8765`。
+
+## 迁移到其他机器
+
+当前实现保留了现场部署配置，克隆后需核对：
+
+- `start_monitor.sh`：平台 `/home/nvidia/xos/setup.bash` 和导览工作区安装路径。
+- `monitor.py`：`PLACES_FILE`、`PLACES_FALLBACK`、底盘 REST 地址及地图相关路径。
+- 工作台不会自动读取语音节点的 `places_file` 参数，需确保两者加载同一份点位配置。
+- 节点启动参数 `VOICE_START_ARGS` 使用语音节点的其他默认值；通过网页启动前确认模型地址、SDK、地图和定位配置可用。
+
+在已手动加载 ROS、平台及导览环境的终端中，也可以从本目录直接运行 `python3 monitor.py --bind 127.0.0.1 --port 8765`；后端的固定配置仍需适配。
 
 ## 页面
 
@@ -20,14 +35,14 @@ bash start_monitor.sh --port 8765
 
 ## 运行示意图
 
-- 不再依赖实景地图：页面用 SVG 画一条示意主线，5 个站点按 `places.yaml` 的顺序排列，不要求与实际几何一致。
+- 页面用 SVG 画示意主线，站点按 `places.yaml` 的顺序排列，不要求与实际几何一致。
 - 机器人位置取底盘 `GET /api/core/navigation/v1/pose` 的 `x/y`，投影到主线上得到沿线进度，绿色胶囊标记大致位置，超过 5 秒无数据会变暗。
 - 站点坐标由 `GET /api/core/navigation/v1/poi` 读取，和语音节点使用同一套点位；改点位后无需改页面。
 - 任务运行时浮层显示进度百分比与「前往 某站点」；待命时显示最近站点。示意图同时出现在总览摄像头下方和地图配置页。
 
 ## 控制边界
 
-只开放三个需要显式确认的动作，请求体必须带 `{"confirm": true}`：
+开放以下四个需要显式确认的接口，请求体必须带 `{"confirm": true}`：
 
 - `POST /api/node/start`：以 `startup_goto_standby:=false` 启动 `guide_voice` 语音节点，启动后不会自行移动。
 - `POST /api/node/stop`：只停止由本页启动的节点；外部启动的节点需在终端停止。
@@ -54,3 +69,5 @@ python3 -m unittest test_monitor -v
 ```
 
 测试不启动 ROS 或机器人服务，检查确认标记、地点白名单、节点未运行时拒绝导航、写方法拒绝、私有文件拒绝、旧图像不可访问与凭据遮盖。
+
+2026-11-19 本次复跑：13 项全部通过；未启动真实 ROS 或底盘服务，未进行实车验证。

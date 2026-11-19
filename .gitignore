@@ -9,3 +9,15 @@ arm_demo/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# 本机备份与运行产物
+.codex-backups/
+*.log
+*.pid
+
+# 本地凭据与部署配置
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
